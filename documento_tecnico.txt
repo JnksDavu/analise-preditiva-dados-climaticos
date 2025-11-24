@@ -1,0 +1,156 @@
+DOCUMENTO TÉCNICO
+Projeto: Previsão de Temperatura Média Diária (São Paulo / NOAA)
+Modelos Comparados: Holt-Winters (Suavização Exponencial Tripla) e SARIMA (Seasonal ARIMA)
+
+1. Objetivo
+Desenvolver pipeline para:
+- Limpeza e padronização de dados meteorológicos históricos (NOAA).
+- Construção de série temporal diária de temperatura média (TAVG).
+- Treinamento e comparação de dois modelos estatísticos avançados (Holt-Winters e SARIMA).
+- Exposição de previsões e métricas via API REST (FastAPI) e visualização interativa (Streamlit).
+
+2. Fonte dos Dados
+Arquivo: data/4174560.csv
+Variáveis principais utilizadas:
+- DATE: data da observação.
+- TAVG: temperatura média.
+- TMAX / TMIN: temperaturas máxima e mínima (usadas para preenchimento).
+- PRCP: precipitação (não usada diretamente na modelagem atual).
+Observações podem conter lacunas; algumas datas ausentes foram interpoladas.
+
+3. Tratamento de Dados
+Passos principais (train_and_eval.py):
+a) Padronização de nomes (uppercase).
+b) Conversão de DATE para datetime.
+c) Conversão robusta para numérico (to_numeric com errors='coerce').
+d) Preenchimento de TMAX/TMIN ausentes com TAVG (reduz perda de registros).
+e) Criação de PRCP_MM (precipitação em mm; NaN -> 0.0).
+f) Agregação por DATE (médias diárias).
+g) Remoção de linhas sem TAVG.
+h) Transformação em série temporal diária (asfreq('D')).
+i) Interpolação bidirecional de faltantes (interpolate limit_direction='both').
+
+Justificativa:
+- A maioria dos modelos clássicos requer série contínua.
+- Interpolação simples preserva tendência macro sem introduzir lógica complexa.
+
+4. Divisão Treino/Teste
+- Método: holdout temporal (primeiros 80% para treino, últimos 20% para teste).
+- Motivação: evita vazamento temporal e mantém ordem cronológica.
+- Fallback: se muito poucas observações, tudo vira treino (teste vazio -> métricas None).
+
+5. Modelos
+a) Holt-Winters (ExponentialSmoothing)
+   - Trend: aditiva.
+   - Sazonalidade semanal (period=7) caso haja pelo menos dois ciclos completos.
+   - Fallback: modelo sem sazonalidade se dados insuficientes.
+   - Benefício: captura nível, tendência e sazonalidade de forma suavizada.
+
+b) SARIMA (Seasonal ARIMA)
+   - Configuração padrão: (p,d,q)=(1,1,1), (P,D,Q,s)=(1,1,1,7).
+   - Fallback para séries curtas: ARIMA simples (1,1,0) sem parte sazonal.
+   - Benefício: modela dependências autoregressivas, médias móveis e diferenças sazonais.
+
+6. Métricas de Avaliação
+Calculadas sobre o bloco de teste (out-of-sample):
+- RMSE (Raiz do Erro Quadrático Médio): sensível a grandes desvios.
+- MAE (Erro Absoluto Médio): interpreta erro médio direto.
+- MAPE (%): erro percentual médio (com tratamento de zeros).
+- R² (Coeficiente de Determinação): só se há pelo menos dois pontos de teste.
+
+Interpretação:
+- RMSE/MAE menores: melhor ajuste.
+- MAPE facilita comparação relativa em percentuais.
+- R² próximo de 1: maior explicação da variância (pode ser negativo se ajuste ruim).
+
+7. Artefatos Gerados
+Diretório: server/artifacts/
+- holtwinters_model.pkl: objeto ExponentialSmoothingResults.
+- sarima_model.pkl: objeto SARIMAXResults.
+- meta.pkl: dicionário com tamanhos, sazonalidade, última data e métricas.
+
+8. API (server/api.py)
+Endpoints principais:
+GET /predict?days=N
+   - Gera N dias de previsão futura para ambos modelos.
+   - Retorna:
+     dias: horizonte solicitado.
+     previsoes: lista [{data, temperatura_prevista_holt_winters, temperatura_prevista_sarima}, ...]
+     metricas: métricas salvas do conjunto de teste.
+     info: metadados (tamanho treino/teste, sazonalidade, última data).
+
+Lógica de Previsão:
+- Carrega modelos e série tratada (TAVG diária).
+- Determina datas futuras (range diário).
+- Aplica forecast(days) em Holt-Winters e get_forecast(days) em SARIMA.
+- Alinha ambas as previsões nas mesmas datas.
+
+Fallback Automático:
+- Se algum artefato ausente, chama treino (auto_train) antes de responder.
+
+9. Dashboard (client/front.py)
+Funcionalidades:
+- Visualização do histórico (linha TAVG).
+- Formulário de previsão (slider dias futuros).
+- Gráfico comparativo: histórico recente (últimos 90 dias) + duas curvas de previsão.
+- Tabela de métricas dos modelos lado a lado.
+- Tabela detalhada das previsões futuras.
+- Amostra dos dados brutos traduzida (colunas em português).
+
+Bibliotecas Chave:
+- Streamlit (UI rápida).
+- Altair (gráficos interativos).
+- Requests (consumo da API).
+
+10. Fluxo Operacional
+a) Preparar ambiente:
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install -r requierements.txt
+b) Treinar:
+   python server/train_and_eval.py
+c) Subir API:
+   python server/api.py
+d) Dashboard:
+   streamlit run client/front.py
+e) Testar endpoint:
+   curl "http://localhost:8000/predict?days=7"
+
+11. Estrutura Simplificada do Treinamento (Pseudo-pipeline)
+Carregar CSV -> Limpar/Agrupar -> Série diária contínua -> Split temporal ->
+Treinar Holt-Winters -> Treinar SARIMA -> Prever teste -> Calcular métricas ->
+Salvar modelos + metadados.
+
+12. Decisões de Design
+- Escolha de sazonalidade semanal (7) para capturar padrões de curto prazo urbanos.
+- Interpolação simples para garantir aplicabilidade dos modelos.
+- Comparação de dois métodos clássicos de séries temporais (complementares).
+- Simplicidade da API (apenas previsão + métricas) para facilitar consumo.
+
+13. Limitações
+- Apenas variável TAVG (modelos univariados).
+- Não modela efeitos externos (exógenas).
+- Sazonalidade anual (365) não explorada.
+- Avaliação única (holdout); não foi feito backtesting com janelas múltiplas.
+- Interpolação pode suavizar extremos reais (ondas de calor).
+- Sem análise automática de outliers ou regime shifts.
+
+14. Possíveis Melhorias Futuras
+- Introduzir SARIMAX com regressões externas (TMAX, TMIN, PRCP_MM).
+- Testar múltiplas sazonalidades (ex.: 7 e 365) via modelos híbridos.
+- Adicionar Prophet ou LSTM para comparação com aprendizagem de máquina.
+- Implementar validação cruzada temporal (rolling origin).
+- Detecção e tratamento de outliers extremos.
+- Ajuste automático de hiperparâmetros (grid search orientado por AIC/BIC).
+- Inclusão de indicadores climáticos macro (ENSO, etc.).
+
+15. Interpretação dos Resultados
+- Diferenças entre curvas de previsão indicam sensibilidade dos modelos ao padrão sazonal.
+- Holt-Winters tende a reagir de forma mais suave (suavização exponencial).
+- SARIMA pode refletir mais flutuações autoregressivas.
+- Métricas oferecem critério objetivo; observar RMSE e MAPE para performance geral.
+
+16. Conclusão
+A solução entrega um ciclo completo: ingestão -> tratamento -> modelagem dupla -> avaliação -> serviço -> visualização. Cria base consolidada para evoluir a partir de dois modelos estatísticos reconhecidos, permitindo comparações e decisões de melhoria com transparência.
+
+FIM
