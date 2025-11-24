@@ -20,7 +20,7 @@ HW_MODEL_FILE = ARTIFACT_DIR / "holtwinters_model.pkl"
 META_FILE = ARTIFACT_DIR / "meta.pkl"
 
 TEST_RATIO = 0.2
-SEASONAL_PERIOD = 7  # semanal (dados diários)
+SEASONAL_PERIOD = 7 
 
 # ---------- UTIL ----------
 def save_pickle(obj: Any, path: Path) -> None:
