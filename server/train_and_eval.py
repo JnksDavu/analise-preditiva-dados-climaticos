@@ -1,156 +1,162 @@
 from pathlib import Path
-from datetime import timedelta
 import pickle
-import pandas as pd
+import warnings
 import numpy as np
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.pipeline import Pipeline
-from sklearn.metrics import mean_squared_error, r2_score, accuracy_score, precision_score, recall_score, f1_score
+import pandas as pd
+from typing import Dict, Any, Tuple
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
+warnings.filterwarnings("ignore")
 
 # ---------- CONFIG ----------
 DATA_PATH = Path("data/4174560.csv")
 ARTIFACT_DIR = Path("server/artifacts")
 ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 
-TEMP_MODEL_FILE = ARTIFACT_DIR / "temperature_model.pkl"
-PRECIP_MODEL_FILE = ARTIFACT_DIR / "precip_model.pkl"
+SARIMA_MODEL_FILE = ARTIFACT_DIR / "sarima_model.pkl"
+HW_MODEL_FILE = ARTIFACT_DIR / "holtwinters_model.pkl"
 META_FILE = ARTIFACT_DIR / "meta.pkl"
 
 TEST_RATIO = 0.2
+SEASONAL_PERIOD = 7  # semanal (dados diários)
 
 # ---------- UTIL ----------
-def save(obj, path):
+def save_pickle(obj: Any, path: Path) -> None:
     with open(path, "wb") as f:
         pickle.dump(obj, f)
 
-def load(path):
-    with open(path, "rb") as f:
-        return pickle.load(f)
-
-# ---------- PREPROCESS ----------
-def load_raw(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path)
-
 def clean(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
     df.columns = [c.strip().upper() for c in df.columns]
     df["DATE"] = pd.to_datetime(df["DATE"])
     for col in ["PRCP", "TAVG", "TMAX", "TMIN"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["TMAX"] = df["TMAX"].fillna(df["TAVG"])
-    df["TMIN"] = df["TMIN"].fillna(df["TAVG"])
-    df["PRCP_MM"] = df["PRCP"].fillna(0.0)
-    df["RAIN"] = (df["PRCP_MM"] > 0).astype(int)
-    agg = df.groupby("DATE").agg({
-        "TAVG": "mean",
-        "TMAX": "mean",
-        "TMIN": "mean",
-        "PRCP_MM": "mean",
-        "RAIN": "max"
-    }).reset_index()
-    return agg.sort_values("DATE").reset_index(drop=True)
+    if "TAVG" in df.columns:
+        df["TMAX"] = df.get("TMAX", df["TAVG"]).fillna(df["TAVG"])
+        df["TMIN"] = df.get("TMIN", df["TAVG"]).fillna(df["TAVG"])
+    df["PRCP_MM"] = df.get("PRCP", 0.0).fillna(0.0)
+    agg = (df.groupby("DATE")
+           .agg({"TAVG": "mean",
+                 "TMAX": "mean",
+                 "TMIN": "mean",
+                 "PRCP_MM": "mean"})
+           .reset_index()
+           .sort_values("DATE"))
+    agg = agg.dropna(subset=["TAVG"]).reset_index(drop=True)
+    return agg
 
-def build_features(df: pd.DataFrame):
-    df = df.copy()
-    df["DAYOFYEAR"] = df["DATE"].dt.dayofyear
-    df["MONTH"] = df["DATE"].dt.month
-    df["SIN_DAY"] = np.sin(2 * np.pi * df["DAYOFYEAR"] / 365.25)
-    df["COS_DAY"] = np.cos(2 * np.pi * df["DAYOFYEAR"] / 365.25)
-    df["SIN_MONTH"] = np.sin(2 * np.pi * df["MONTH"] / 12)
-    df["COS_MONTH"] = np.cos(2 * np.pi * df["MONTH"] / 12)
-    for lag in [1, 2, 3, 7]:
-        df[f"TAVG_LAG_{lag}"] = df["TAVG"].shift(lag)
-        df[f"RAIN_LAG_{lag}"] = df["RAIN"].shift(lag)
-    df = df.dropna().reset_index(drop=True)
-    feature_cols = [c for c in df.columns if c.startswith(("SIN_", "COS_", "TAVG_LAG_", "RAIN_LAG_"))] + ["RAIN", "PRCP_MM"]
-    X = df[feature_cols]
-    y_temp = df["TAVG"]
-    y_rain = df["RAIN"]
-    return X, y_temp, y_rain, feature_cols, df
+def load_series() -> pd.Series:
+    raw = pd.read_csv(DATA_PATH)
+    df = clean(raw)
+    y = pd.Series(df["TAVG"].values, index=df["DATE"]).asfreq("D")
+    y = y.interpolate(limit_direction="both")
+    return y
 
-def split_time(X, y1, y2, test_ratio):
-    n = len(X)
+def split_train_test(y: pd.Series, test_ratio: float) -> Tuple[pd.Series, pd.Series]:
+    n = len(y)
+    if n < 10:
+        return y, y.iloc[0:0]
     split = int(n * (1 - test_ratio))
-    return (X.iloc[:split], X.iloc[split:],
-            y1.iloc[:split], y1.iloc[split:],
-            y2.iloc[:split], y2.iloc[split:])
+    split = min(max(split, 1), n - 1)
+    return y.iloc[:split], y.iloc[split:]
 
 # ---------- MODELOS ----------
-def train_temp(X_train, y_train):
-    pipe = Pipeline([
-        ("scaler", StandardScaler()),
-        ("reg", LinearRegression())
-    ])
-    pipe.fit(X_train, y_train)
-    return pipe
+def fit_holt_winters(y_train: pd.Series, seasonal_periods: int = SEASONAL_PERIOD):
+    use_season = len(y_train) >= 2 * seasonal_periods
+    try:
+        model = ExponentialSmoothing(
+            y_train,
+            trend="add",
+            seasonal=("add" if use_season else None),
+            seasonal_periods=(seasonal_periods if use_season else None),
+            initialization_method="estimated",
+        ).fit()
+    except Exception:
+        # Fallback simples sem sazonalidade
+        model = ExponentialSmoothing(y_train, trend="add", seasonal=None).fit()
+    return model
 
-def train_rain(X_train, y_train):
-    if len(set(y_train)) < 2:
-        prob = float(np.mean(y_train))
-        class Dummy:
-            def predict(self, X): return np.zeros(len(X), dtype=int)
-            def predict_proba(self, X): return np.column_stack([1 - prob, np.full(len(X), prob)])
-        return Dummy()
-    pipe = Pipeline([
-        ("scaler", StandardScaler()),
-        ("clf", LogisticRegression(max_iter=500, solver="lbfgs"))
-    ])
-    pipe.fit(X_train, y_train)
-    return pipe
+def fit_sarima(y_train: pd.Series, seasonal_periods: int = SEASONAL_PERIOD):
+    if len(y_train) < seasonal_periods + 5:
+        order = (1, 1, 0)
+        seasonal_order = (0, 0, 0, 0)
+    else:
+        order = (1, 1, 1)
+        seasonal_order = (1, 1, 1, seasonal_periods)
+    try:
+        model = SARIMAX(
+            y_train,
+            order=order,
+            seasonal_order=seasonal_order,
+            enforce_stationarity=False,
+            enforce_invertibility=False,
+        ).fit(disp=False)
+    except Exception:
+        # Fallback ARIMA simples
+        model = SARIMAX(
+            y_train,
+            order=(1, 1, 0),
+            seasonal_order=(0, 0, 0, 0),
+            enforce_stationarity=False,
+            enforce_invertibility=False,
+        ).fit(disp=False)
+    return model
 
 # ---------- MÉTRICAS ----------
-def metrics_reg(model, X_test, y_test):
-    if len(X_test) == 0:
-        return {"rmse": None, "r2": None}
-    pred = model.predict(X_test)
-    mse = mean_squared_error(y_test, pred)  # remover parâmetro squared para compatibilidade
-    rmse = mse ** 0.5
-    return {
-        "rmse": rmse,
-        "r2": r2_score(y_test, pred)
-    }
-
-def metrics_clf(model, X_test, y_test):
-    if len(X_test) == 0:
-        return {"accuracy": None, "precision": None, "recall": None, "f1": None}
-    pred = model.predict(X_test)
-    return {
-        "accuracy": accuracy_score(y_test, pred),
-        "precision": precision_score(y_test, pred, zero_division=0),
-        "recall": recall_score(y_test, pred, zero_division=0),
-        "f1": f1_score(y_test, pred, zero_division=0)
-    }
+def calc_metrics(y_true: pd.Series, y_pred: np.ndarray) -> Dict[str, Any]:
+    if len(y_true) == 0 or len(y_pred) == 0:
+        return {"rmse": None, "mae": None, "mape": None, "r2": None}
+    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+    mae = float(mean_absolute_error(y_true, y_pred))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mape = float(np.mean(np.abs((y_true - y_pred) / np.clip(np.abs(y_true), 1e-6, None))) * 100.0)
+    r2 = float(r2_score(y_true, y_pred)) if len(y_true) >= 2 else None
+    return {"rmse": rmse, "mae": mae, "mape": mape, "r2": r2}
 
 # ---------- EXECUÇÃO TREINO ----------
 def main():
-    raw = load_raw(DATA_PATH)
-    clean_df = clean(raw)
-    X, y_temp, y_rain, feature_cols, full_df = build_features(clean_df)
-    (X_train, X_test,
-     y_temp_train, y_temp_test,
-     y_rain_train, y_rain_test) = split_time(X, y_temp, y_rain, TEST_RATIO)
+    y = load_series()
+    y_train, y_test = split_train_test(y, TEST_RATIO)
 
-    temp_model = train_temp(X_train, y_temp_train)
-    rain_model = train_rain(X_train, y_rain_train)
+    hw_model = fit_holt_winters(y_train)
+    sarima_model = fit_sarima(y_train)
 
-    temp_metrics = metrics_reg(temp_model, X_test, y_temp_test)
-    rain_metrics = metrics_clf(rain_model, X_test, y_rain_test)
+    steps = len(y_test)
+    if steps > 0:
+        hw_pred = hw_model.forecast(steps)
+        sarima_pred = sarima_model.get_forecast(steps).predicted_mean
+        hw_pred.index = y_test.index
+        sarima_pred.index = y_test.index
+        metrics_hw = calc_metrics(y_test, hw_pred.values)
+        metrics_sarima = calc_metrics(y_test, sarima_pred.values)
+    else:
+        metrics_hw = {"rmse": None, "mae": None, "mape": None, "r2": None}
+        metrics_sarima = {"rmse": None, "mae": None, "mape": None, "r2": None}
 
-    save(temp_model, TEMP_MODEL_FILE)
-    save(rain_model, PRECIP_MODEL_FILE)
-    save({
-        "feature_cols": feature_cols,
-        "last_date": str(clean_df["DATE"].max()),
-        "rows": len(clean_df),
-        "temp_metrics": temp_metrics,
-        "rain_metrics": rain_metrics
+    save_pickle(hw_model, HW_MODEL_FILE)
+    save_pickle(sarima_model, SARIMA_MODEL_FILE)
+    save_pickle({
+        "dataset_tamanho": int(len(y)),
+        "tamanho_treino": int(len(y_train)),
+        "tamanho_teste": int(len(y_test)),
+        "ultima_data": str(y.index.max().date()) if len(y) else None,
+        "periodicidade": "D",
+        "sazonalidade": SEASONAL_PERIOD,
+        "metricas": {
+            "holt_winters": metrics_hw,
+            "sarima": metrics_sarima
+        }
     }, META_FILE)
 
     print("Treino concluído.")
-    print("Métricas temperatura:", temp_metrics)
-    print("Métricas chuva:", rain_metrics)
-    print("Artefatos salvos em:", ARTIFACT_DIR)
+    print("Métricas Holt-Winters:", metrics_hw)
+    print("Métricas SARIMA:", metrics_sarima)
+    print("Arquivos gerados:")
+    for p in [HW_MODEL_FILE, SARIMA_MODEL_FILE, META_FILE]:
+        print(" -", p, "OK" if p.exists() else "FALHOU")
 
 if __name__ == "__main__":
     main()
