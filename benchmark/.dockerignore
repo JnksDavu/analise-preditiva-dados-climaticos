@@ -1,0 +1,25 @@
+# Ignorar arquivos desnecessários no Docker
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+*.egg-info/
+dist/
+build/
+*.log
+.git/
+.gitignore
+.DS_Store
+*.csv
+*.html
+*.pkl
+*.h5
+*.hdf5
+data/
+*.ipynb_checkpoints/
+

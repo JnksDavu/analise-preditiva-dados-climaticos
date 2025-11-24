@@ -1,0 +1,69 @@
+# Arquivos gerados
+*.csv
+*.html
+*.pkl
+*.h5
+*.hdf5
+*.json
+*.xlsx
+*.xls
+
+# Dados
+noaa_data.csv
+comparacao_modelos.csv
+dashboard_clima_noaa.html
+apresentacao_noaa.html
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Ambiente virtual
+venv/
+env/
+ENV/
+.venv
+venv.bak/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Docker
+.docker/
+
+# Temporários
+*.tmp
+*.temp
+.cache/
+
+# Dados e resultados
+data/
+results/
+outputs/
+*.db
+*.sqlite
+
+# Arquivos de sistema
+Thumbs.db
+desktop.ini
+
