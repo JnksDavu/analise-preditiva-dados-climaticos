@@ -275,9 +275,10 @@ if st.button("Prever com SARIMA e Holt-Winters"):
 
             st.subheader("Métricas (Teste)")
             metricas = data.get("metricas", {})
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             hw = metricas.get("holt_winters", {})
             sa = metricas.get("sarima", {})
+            na = metricas.get("naive", {})
             with col1:
                 st.markdown("Holt-Winters")
                 st.write(
@@ -298,6 +299,16 @@ if st.button("Prever com SARIMA e Holt-Winters"):
                         "R²": sa.get("r2"),
                     }
                 )
+            with col3: 
+                st.markdown("Naive (Baseline)")
+                st.write(
+                    {
+                        "RMSE": na.get("rmse"),
+                        "MAE": na.get("mae"),
+                        "MAPE (%)": na.get("mape"),
+                        "R²": na.get("r2"),
+                    }
+                )
 
             st.subheader("Previsões")
             st.dataframe(
@@ -310,5 +321,98 @@ if st.button("Prever com SARIMA e Holt-Winters"):
                 )
             )
 
+            st.subheader("Métricas (Validação Cruzada Temporal)")
+            st.caption("Métricas médias calculadas em múltiplas janelas de treino/teste (Walk-Forward Validation) para avaliar a estabilidade.")
+            cv_metricas = data.get("metricas_cv", {})
+
+            col1_cv, col2_cv, col3_cv = st.columns(3)
+            hw_cv = cv_metricas.get("holt_winters", {})
+            sa_cv = cv_metricas.get("sarima", {})
+            na_cv = cv_metricas.get("naive", {})
+
+            with col1_cv:
+                st.markdown("Holt-Winters")
+                st.write(
+                    {
+                        "RMSE": hw_cv.get("rmse"),
+                        "MAE": hw_cv.get("mae"),
+                        "MAPE (%)": hw_cv.get("mape"),
+                        "R²": hw_cv.get("r2"),
+                    }
+                )
+            with col2_cv:
+                st.markdown("SARIMA")
+                st.write(
+                    {
+                        "RMSE": sa_cv.get("rmse"),
+                        "MAE": sa_cv.get("mae"),
+                        "MAPE (%)": sa_cv.get("mape"),
+                        "R²": sa_cv.get("r2"),
+                    }
+                )
+            with col3_cv:
+                st.markdown("Naive (Baseline)")
+                st.write(
+                    {
+                        "RMSE": na_cv.get("rmse"),
+                        "MAE": na_cv.get("mae"),
+                        "MAPE (%)": na_cv.get("mape"),
+                        "R²": na_cv.get("r2"),
+                    }
+                )
+
     except Exception as e:
         st.error(f"Falha ao obter previsões: {e}")
+
+    st.header("Análise de Resíduos (SARIMA)")
+    residuos = data.get("analise_residuos_sarima", {})
+
+    if residuos and residuos.get("ljung_box_p_value") is not None:
+        
+        # Exibir o resultado do Teste Ljung-Box
+        p_value = residuos["ljung_box_p_value"]
+        
+        st.markdown("### Teste de Ljung-Box (Ruído Branco)")
+        st.info(f"O teste verifica se há autocorrelação significativa nos resíduos (Lags = 20).")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("P-Value", f"{p_value:.4f}")
+        with col2:
+            if p_value < 0.05:
+                st.error("Rejeita H₀: **Há autocorrelação** significativa nos resíduos. O modelo **pode ser aprimorado**.")
+            else:
+                st.success("Não Rejeita H₀: **Não há autocorrelação** significativa. Os resíduos se aproximam de **ruído branco**.")
+
+        st.markdown("### Autocorrelação dos Resíduos (ACF)")
+        
+        acf_list = residuos.get("acf_lags", [])
+        if acf_list:
+            df_acf = pd.DataFrame({
+                "Lag": range(len(acf_list)),
+                "ACF": acf_list
+            })
+            # Plot da ACF
+            chart_acf = (
+                alt.Chart(df_acf.iloc[1:]) # Ignora o lag 0 (sempre 1.0)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Lag:O", title="Lag (Dias)"),
+                    y=alt.Y("ACF:Q", title="Coeficiente de Autocorrelação"),
+                    tooltip=["Lag:O", alt.Tooltip("ACF:Q", format=".4f")],
+                    color=alt.condition(
+                        alt.datum.ACF > 0,
+                        alt.value("steelblue"), # Cores para positivo/negativo
+                        alt.value("firebrick")
+                    )
+                )
+            )
+            st.altair_chart(chart_acf, use_container_width=True)
+            st.caption("Linhas fora do intervalo de significância indicam que o modelo não capturou toda a informação.")
+        
+        st.markdown("### Média dos Resíduos")
+        st.metric("Média", f"{residuos.get('mean_residuals', 0.0):.4f}")
+        st.caption("A média deve ser próxima de zero para um bom ajuste.")
+        
+    else:
+        st.info("Análise de resíduos não disponível.")

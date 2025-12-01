@@ -251,6 +251,8 @@ def predict(days: int = Query(FORECAST_HORIZON_DEFAULT, ge=1, le=60)):
         "dias": days,
         "previsoes": previsoes,
         "metricas": meta.get("metricas", {}),
+        "metricas_cv": meta.get("metricas_cv", {}),
+        "analise_residuos_sarima": meta.get("analise_residuos_sarima", {}),
         "info": {
             "tamanho_dataset": meta.get("dataset_tamanho"),
             "tamanho_treino": meta.get("tamanho_treino"),
